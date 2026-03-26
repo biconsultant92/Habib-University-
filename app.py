@@ -79,7 +79,7 @@ def login():
                 )
                 
                 st.write("") # Little spacing
-                submit_button = st.form_submit_button("🚀 Login", type="primary", use_container_width=True)
+                submit_button = st.form_submit_button("Login", type="primary", use_container_width=True)
             
             # Form submission logic
             if submit_button:
@@ -96,9 +96,9 @@ def login():
                             st.session_state.show_welcome_toast = True 
                             st.rerun()
                         else:
-                            st.error("❌ Invalid ID. User not found. Please try again.")
+                            st.error(" Invalid ID. User not found. Please try again.")
                 else:
-                    st.warning("⚠️ Please enter an ID to login.")
+                    st.warning(" Please enter an ID to login.")
                     
     # Subtle footer hint
     st.markdown("<p style='text-align: center; color: #D3D3D3; font-size: 13px; margin-top: 20px;'>Authorized Personnel Only</p>", unsafe_allow_html=True)
@@ -124,7 +124,7 @@ def render_faculty_ui(user_id, full_name, program):
     with tab1:
             st.subheader("Plan Your Upcoming Availability")
             
-            # 🌟 Session State Flags & Default Times
+            #  Session State Flags & Default Times
             if "avail_checked" not in st.session_state:
                 st.session_state.avail_checked = False
             
@@ -211,8 +211,8 @@ def render_faculty_ui(user_id, full_name, program):
                 if booking_frequency == "Whole Semester":
                     day_of_week = st.selectbox("Day of Week", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"], on_change=reset_check)
                 else:
-                    # 📅 Shows a standard Calendar to pick a specific date
-                    # 👇 Here is the  validation Minimum date 'tomorrow'
+                    #  Shows a standard Calendar to pick a specific date
+                    #  Here is the  validation Minimum date 'tomorrow'
                     tomorrow = datetime.date.today() + datetime.timedelta(days=1)
                     
                     selected_date = st.date_input(
