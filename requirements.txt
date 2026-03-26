@@ -2,3 +2,4 @@ streamlit
 pandas
 pyodbc
 python-dotenv
+streamlit-autorefresh
