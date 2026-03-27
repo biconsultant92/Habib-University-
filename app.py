@@ -5,11 +5,15 @@ import time
 from db_connection import fetch_data
 from streamlit_autorefresh import st_autorefresh
 import admin_backend as ab
-
+#Single SignOn
+import jwt
+from streamlit_oauth import OAuth2Component
 # Importing Backend Logic Files
 import faculty_backend as fb
 import student_backend as sb
 from availability_logic import calculate_availability
+#log
+from log import log_action
 
 # ==========================================
 # PAGE CONFIGURATION & CSS
@@ -52,62 +56,141 @@ if 'show_welcome_toast' not in st.session_state:
     st.session_state.show_welcome_toast = False
 
 # ==========================================
+# MICROSOFT SSO CONFIGURATION
+# ==========================================
+# Fetching credentials from .streamlit/secrets.toml
+try:
+    CLIENT_ID = st.secrets["microsoft_sso"]["client_id"]
+    CLIENT_SECRET = st.secrets["microsoft_sso"]["client_secret"]
+    TENANT_ID = st.secrets["microsoft_sso"]["tenant_id"]
+except KeyError:
+    st.error("⚠️ Missing Microsoft SSO configuration in .streamlit/secrets.toml file.")
+    st.stop()
+
+# Microsoft Azure AD Endpoints
+AUTHORIZE_ENDPOINT = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/authorize"
+TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+
+# Initialize OAuth2 Component (Without revoke_endpoint to avoid TypeError)
+oauth2 = OAuth2Component(
+    client_id=CLIENT_ID, 
+    client_secret=CLIENT_SECRET, 
+    authorize_endpoint=AUTHORIZE_ENDPOINT, 
+    token_endpoint=TOKEN_ENDPOINT, 
+    refresh_token_endpoint=TOKEN_ENDPOINT
+)
+
+
+# ==========================================
 # LOGIN & LOGOUT UI LOGIC
 # ==========================================
 def login():
     st.write("")
     st.write("")
     
-    # Header
+    # Header Section
     st.markdown("<h1 style='text-align: center; color: #1E88E5;'>🎓 Office Hours Portal</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: gray; font-size: 18px;'>Connect with your faculty efficiently & seamlessly.</p>", unsafe_allow_html=True)
     st.write("---")
     
+    # STRONG DYNAMIC REDIRECT URI LOGIC
+    host = "10.15.2.95:8501" 
+
+    try:
+        
+        if hasattr(st, 'context') and hasattr(st.context, 'headers'):
+            fetched_host = st.context.headers.get("Host")
+            if fetched_host:
+                host = fetched_host
+    except Exception as e:
+        
+        print(f"Host detection failed: {e}")
+
+    # Final URI jo Microsoft ko bheji jayegi
+    REDIRECT_URI = f"http://{host}/component/streamlit_oauth.authorize_button"
+
     # Centered login card
-    col1, col2, col3 = st.columns([1, 1.2, 1])
+    col1, col2, col3 = st.columns([1, 1.5, 1])
     
     with col2:
         with st.container(border=True):
-            st.markdown("<h3 style='text-align: center;'>🔐 Secure Login</h3>", unsafe_allow_html=True)
+            st.markdown("<h3 style='text-align: center;'>🔐 Secure SSO Login</h3>", unsafe_allow_html=True)
             st.write("")
             
-            with st.form(key="login_form", clear_on_submit=False):
-                user_id_input = st.text_input(
-                    "👤 Enter your ID", 
-                    placeholder="e.g., 00712 (Faculty) or 17432 (Student)",
-                    help="Type your ID and press Enter to login."
-                )
-                
-                st.write("") 
-                submit_button = st.form_submit_button(" Login", type="primary", use_container_width=True)
+            # Button Alignment Columns ([0.5, 4, 0.5])
+            btn_col1, btn_col2, btn_col3 = st.columns([0.5, 4, 0.5])
             
-            # Form submission logic
-            if submit_button:
-                if user_id_input.strip(): 
-                    with st.spinner("Authenticating securely..."):
-                        time.sleep(0.5) 
+            with btn_col2:
+                # Display the Microsoft Login Button
+                result = oauth2.authorize_button(
+                    name="Continue with Microsoft",
+                    redirect_uri=REDIRECT_URI,
+                    scope="openid email profile",
+                    icon="https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg"
+                )
+            
+            # Authentication Logic (Runs after successful redirect)
+            if result:
+                with st.spinner("Verifying credentials securely..."):
+                    try:
+                        # Extract the ID Token and decode it to get the user's email
+                        id_token = result.get('token', {}).get('id_token', '')
+                        decoded_token = jwt.decode(id_token, options={"verify_signature": False})
                         
-                        query = "SELECT UserID, FullName, Role, Program FROM Users WHERE UserID = ?"
-                        df_user = fetch_data(query, (user_id_input.strip(),))
+                        # Fetch email (fallback to standard email key if preferred_username is missing)
+                        user_email = decoded_token.get('preferred_username', decoded_token.get('email', '')).lower()
+                        
+                        if not user_email:
+                            st.error("❌ Could not retrieve email from Microsoft. Please contact IT.")
+                            st.stop()
+                            
+                        # Query the database to find the user by their Email
+                        query = "SELECT UserID, FullName, Email, Role, Program FROM Users WHERE Email = ?"
+                        df_user = fetch_data(query, (user_email,))
                         
                         if not df_user.empty:
+                            # User verified successfully in the local database
                             st.session_state.logged_in = True
                             st.session_state.user_data = df_user.iloc[0].to_dict()
                             st.session_state.show_welcome_toast = True 
+                            
+                            # 🌟 SUCCESSFUL LOGIN LOG ENTRY 🌟
+                            log_action(
+                                description="User successfully logged in via Microsoft SSO.",
+                                module_accessed="Authentication",
+                                is_login=True
+                            )
+                            
                             st.rerun()
                         else:
-                            st.error("❌ Invalid ID. User not found. Please try again.")
-                else:
-                    st.warning("⚠️ Please enter an ID to login.")
+                            # Email is valid via Microsoft, but NOT registered in our database
+                            st.error(f"❌ Access Denied. The email '{user_email}' is not registered in the system.")
+                            
+                    except Exception as e:
+                        st.error(f"⚠️ Authentication error occurred: {e}")
                     
     st.markdown("<p style='text-align: center; color: #D3D3D3; font-size: 13px; margin-top: 20px;'>Authorized Personnel Only</p>", unsafe_allow_html=True)
 
 
 def logout():
-    """Logs the user out and resets session state."""
+    """Logs the user out and resets session state completely."""
+    # 🌟 LOGOUT LOG ENTRY 🌟
+    if st.session_state.get('logged_in'):
+        log_action(
+            description="User logged out manually.",
+            module_accessed="Authentication",
+            is_logout=True 
+        )
+        
     st.session_state.logged_in = False
     st.session_state.user_data = None
     st.session_state.show_welcome_toast = False
+    
+    # Remove Microsoft SSO token caches if they exist
+    for key in list(st.session_state.keys()):
+        if key.startswith("token_") or key == "sso_token":
+            del st.session_state[key]
+            
     st.rerun()
 
 # ==========================================
@@ -1037,19 +1120,70 @@ def render_admin_ui(user_id, full_name):
         st.subheader("System Statistics")
         stats = ab.get_dashboard_stats()
         
+        #  Variables initialization for clicks
+        if "admin_active_view" not in st.session_state:
+            st.session_state.admin_active_view = "none"
+        
         col1, col2, col3, col4 = st.columns(4)
         
-        with col3:
-            st.metric(label="✅ Active Base Schedules", value=stats.get('total_active_schedules', 0))
-        with col4:
-            st.metric(label="🔄 Total Schedule Modifications", value=stats.get('total_exceptions', 0))
-        with col2:
-            st.metric(label="👨‍🏫 Total Registered Faculty", value=stats.get('total_faculty', 0)) 
+        #  Metrics Convert Into Buttons (Card Style)
         with col1:
-            st.metric(label="👨‍🎓 Total Registered Students", value=stats.get('total_students', 0)) 
-            
+            with st.container(border=True):
+                # # hata diya gaya hai aur container use kiya hai
+                if st.button(f"👨‍🎓 Total Students \n\n {stats.get('total_students', 0)}", use_container_width=True, type="tertiary"):
+                    st.session_state.admin_active_view = "students"
+                
+        with col2:
+            with st.container(border=True):
+                if st.button(f"👨‍🏫 Total Faculty \n\n {stats.get('total_faculty', 0)}", use_container_width=True, type="tertiary"):
+                    st.session_state.admin_active_view = "faculty"
+                
+        with col3:
+            with st.container(border=True):
+                if st.button(f"✅ Active Base Schedules \n\n {stats.get('total_active_schedules', 0)}", use_container_width=True, type="tertiary"):
+                    st.session_state.admin_active_view = "schedules"
+                
+        with col4:
+            with st.container(border=True):
+                if st.button(f"🔄 Total Modifications \n\n {stats.get('total_exceptions', 0)}", use_container_width=True, type="tertiary"):
+                    st.session_state.admin_active_view = "modifications"
+                
         st.divider()
-        st.info("💡 Welcome to the Admin Portal! Use the tabs above to view detailed faculty schedules and track who has modified their regular timings or taken leaves.")
+
+        # ==========================================
+        #  DYNAMIC DATA TABLES DISPLAY
+        # ==========================================
+        if st.session_state.admin_active_view == "students":
+            st.markdown("### 👨‍🎓 Registered Students Details")
+            df_students = ab.get_all_student_details()
+            if not df_students.empty:
+                df_students.insert(0, 'S.No.', range(1, len(df_students) + 1))
+            st.dataframe(df_students, use_container_width=True, hide_index=True)
+            
+        elif st.session_state.admin_active_view == "faculty":
+            st.markdown("### 👨‍🏫 Registered Faculty Details")
+            df_faculty = ab.get_all_faculty_details()
+            if not df_faculty.empty:
+                df_faculty.insert(0, 'S.No.', range(1, len(df_faculty) + 1))
+            st.dataframe(df_faculty, use_container_width=True, hide_index=True)
+            
+        elif st.session_state.admin_active_view == "schedules":
+            st.markdown("### ✅ All Active Base Schedules")
+            df_schedules = ab.get_all_faculty_schedules()
+            if not df_schedules.empty:
+                df_schedules.insert(0, 'S.No.', range(1, len(df_schedules) + 1))
+            st.dataframe(df_schedules, use_container_width=True, hide_index=True)
+            
+        elif st.session_state.admin_active_view == "modifications":
+            st.markdown("### 🔄 Schedule Changes & Leaves")
+            df_exceptions = ab.get_all_exceptions()
+            if not df_exceptions.empty:
+                df_exceptions.insert(0, 'S.No.', range(1, len(df_exceptions) + 1))
+            st.dataframe(df_exceptions, use_container_width=True, hide_index=True)
+            
+        else:
+            st.info("💡 Welcome to the Admin Portal! Click on any button above to see detailed reports right here.")
+
     # ------------------------------------------
     # ADMIN: TAB 2 (All Schedules)
     # ------------------------------------------
@@ -1080,6 +1214,11 @@ def render_admin_ui(user_id, full_name):
                 
             st.write("")
             st.markdown(f"**Showing {len(df_filtered)} records:**")
+            
+            #  Add S.No
+            if not df_filtered.empty:
+                df_filtered.insert(0, 'S.No.', range(1, len(df_filtered) + 1))
+                
             st.dataframe(df_filtered, use_container_width=True, hide_index=True)
         else:
             st.warning("No active schedules found in the database.")
@@ -1095,9 +1234,30 @@ def render_admin_ui(user_id, full_name):
             df_exc = ab.get_all_exceptions() 
             
         if not df_exc.empty:
+            # Add S.No
+            df_exc.insert(0, 'S.No.', range(1, len(df_exc) + 1))
             st.dataframe(df_exc, use_container_width=True, hide_index=True)
         else:
-            st.success(" No schedule changes or cancellations logged yet. All schedules are running on their regular timings!")     
+            st.success(" No schedule changes or cancellations logged yet. All schedules are running on their regular timings!")  
+
+
+        # ==========================================
+    #  FOOTER / SYSTEM MANUAL LINK
+    # ==========================================
+    st.write("") # Thori si space dene ke liye
+    st.write("") 
+    
+    footer_html = """
+    <div style="text-align: center; margin-top: 50px; padding-top: 20px; border-top: 1px solid #444;">
+        <p style="color: #888; font-size: 14px;">
+            Need help understanding this Faculty Hours System? 
+            <a href="https://your-website.com/system-manual" target="_blank" style="color: #4da6ff; text-decoration: none; font-weight: bold;">
+                📖 View Complete System Manual
+            </a>
+        </p>
+    </div>
+    """
+    st.markdown(footer_html, unsafe_allow_html=True) 
 
 # ==========================================
 # MAIN APP EXECUTION FLOW
